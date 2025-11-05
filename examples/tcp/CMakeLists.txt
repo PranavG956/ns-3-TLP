@@ -112,3 +112,22 @@ build_example(
     ${libapplications}
     ${libtraffic-control}
 )
+
+
+build_example(
+  NAME tcp-tlp-demo
+  SOURCE_FILES tcp-tlp-demo.cc
+  LIBRARIES_TO_LINK
+    ${libpoint-to-point}
+    ${libapplications}
+    ${libinternet}
+)
+
+build_example(
+  NAME tcp-tlp-comparison
+  SOURCE_FILES tcp-tlp-comparison.cc
+  LIBRARIES_TO_LINK
+    ${libpoint-to-point}
+    ${libapplications}
+    ${libinternet}
+)

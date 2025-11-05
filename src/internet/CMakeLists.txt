@@ -126,6 +126,7 @@ set(source_files
     model/udp-socket-factory.cc
     model/udp-socket-impl.cc
     model/udp-socket.cc
+    model/tcp-socket-base.cc
 )
 
 set(header_files
@@ -333,6 +334,11 @@ set(test_sources
     test/tcp-yeah-test.cc
     test/tcp-zero-window-test.cc
     test/udp-test.cc
+    test/tcp-tlp-test-suite.cc
+    test/tcp-tlp-probe-test.cc
+    test/tcp-tlp-recovery-test.cc
+    test/tcp-tlp-example.cc
+    test/tcp-tlp-loss-example.cc
 )
 
 build_lib(

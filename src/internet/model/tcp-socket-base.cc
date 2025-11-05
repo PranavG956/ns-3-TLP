@@ -7,6 +7,9 @@
  * Author: Adrian Sai-wah Tam <adrian.sw.tam@gmail.com>
  */
 
+
+ // Additional lines added in the code: 180, 328, 438, 559, 1401, 2083, 2980, 3765, 4349
+
 #define NS_LOG_APPEND_CONTEXT                                                                      \
     if (m_node)                                                                                    \
     {                                                                                              \
@@ -173,6 +176,23 @@ TcpSocketBase::GetTypeId()
                           PointerValue(),
                           MakePointerAccessor(&TcpSocketBase::m_recoveryOps),
                           MakePointerChecker<TcpRecoveryOps>())
+
+            // Additional attributes added
+
+            .AddAttribute ("TlpEnabled", "Enable Tail Loss Probe",
+                        BooleanValue (false),
+                        MakeBooleanAccessor (&TcpSocketBase::m_tlpEnabled),
+                        MakeBooleanChecker ())
+            .AddAttribute ("TlpMaxProbes", "Maximum number of TLP probes to send",
+                        UintegerValue (2),
+                        MakeUintegerAccessor (&TcpSocketBase::m_tlpMaxProbes),
+                        MakeUintegerChecker<uint32_t> ())
+            .AddAttribute ("TlpTimeoutMin", "Minimum TLP timeout value",
+                        TimeValue (MilliSeconds (10)),
+                        MakeTimeAccessor (&TcpSocketBase::m_tlpTimeoutMin),
+                        MakeTimeChecker ())
+            //end
+
             .AddAttribute(
                 "ReTxThreshold",
                 "Threshold for fast retransmit",
@@ -305,6 +325,17 @@ TcpSocketBase::TcpSocketBase()
 
     m_tcb->m_sendEmptyPacketCallback = MakeCallback(&TcpSocketBase::SendEmptyPacket, this);
 
+
+    // Initialization of the TLP variables
+    m_tlpEnabled = false;
+    m_tlpProbeCount = 0;
+    m_tlpProbeOutstanding = false;
+    m_tlpProbeSeq = SequenceNumber32(0);
+    m_tlpMaxProbes = 2;
+    m_tlpTimeoutMin = MilliSeconds(10);
+
+    //end extra
+
     bool ok;
 
     ok = m_tcb->TraceConnectWithoutContext(
@@ -403,7 +434,9 @@ TcpSocketBase::TcpSocketBase(const TcpSocketBase& sock)
       m_pacingTimer(Timer::CANCEL_ON_DESTROY),
       m_ecnEchoSeq(sock.m_ecnEchoSeq),
       m_ecnCESeq(sock.m_ecnCESeq),
-      m_ecnCWRSeq(sock.m_ecnCWRSeq)
+      m_ecnCWRSeq(sock.m_ecnCWRSeq),
+      m_tlpTxTrace(),
+      m_tlpAckTrace()
 {
     NS_LOG_FUNCTION(this);
     NS_LOG_LOGIC("Invoked the copy constructor");
@@ -521,6 +554,184 @@ TcpSocketBase::~TcpSocketBase()
     m_tcp = nullptr;
     CancelAllTimers();
 }
+
+
+//TLP functions here
+
+bool
+TcpSocketBase::IsTlpAvailable() const
+{
+  // TLP is available if enabled, not in recovery, and we have outstanding data
+  return (m_tlpEnabled && 
+          m_state != ESTABLISHED &&
+          m_txBuffer->BytesInFlight() > 0 &&
+          !m_tlpProbeOutstanding &&
+          m_tlpProbeCount < m_tlpMaxProbes);
+}
+
+void
+TcpSocketBase::ScheduleTlpProbe()
+{
+  NS_LOG_FUNCTION(this);
+  
+  if (!IsTlpAvailable())
+  {
+    return;
+  }
+
+  // Don't schedule if we're in CA_OPEN and have very little data in flight
+  // This prevents TLP from firing too aggressively
+  if (m_state == ESTABLISHED  && m_txBuffer->BytesInFlight() <= m_tcb -> m_segmentSize)
+  {
+    return;
+  }
+
+  // Calculate TLP timeout: max(2*SRTT, min_timeout)
+  Time tlpTimeout = Time::Max();
+  
+  if (m_tcb->m_lastRtt != Time::Max())
+  {
+    tlpTimeout = Max(2 * m_tcb->m_lastRtt, m_tlpTimeoutMin);
+  }
+  else
+  {
+    // No RTT sample yet, use conservative timeout
+    tlpTimeout = MilliSeconds(100);
+  }
+
+
+
+  NS_LOG_LOGIC("Scheduling TLP probe in " << tlpTimeout.GetSeconds() << "s");
+  m_tlpTimer = Simulator::Schedule(tlpTimeout, &TcpSocketBase::TlpTimeout, this);
+}
+
+void
+TcpSocketBase::SendTlpProbe()
+{
+  NS_LOG_FUNCTION(this);
+  
+  if (!IsTlpAvailable())
+  {
+    return;
+  }
+
+  // Determine what to send as probe
+  SequenceNumber32 probeSeq;
+  bool isRetransmission = false;
+
+  // Strategy: Send new data if available, otherwise retransmit oldest unacked
+  if (m_txBuffer->SizeFromSequence(m_tcb->m_nextTxSequence) > 0)
+  {
+    // New data available
+    probeSeq = m_tcb->m_nextTxSequence;
+    NS_LOG_INFO("TLP sending new data as probe: seq=" << probeSeq);
+  }
+  else
+  {
+    // No new data, retransmit oldest unacked
+    probeSeq = m_txBuffer->HeadSequence();
+    isRetransmission = true;
+    NS_LOG_INFO("TLP retransmitting as probe: seq=" << probeSeq);
+  }
+
+  // Send the probe packet
+  uint32_t sz = SendDataPacket(probeSeq, m_tcb->m_segmentSize, isRetransmission);
+  
+  if (sz > 0)
+  {
+    m_tlpProbeOutstanding = true;
+    m_tlpProbeSeq = probeSeq;
+    m_tlpProbeCount++;
+    
+    NS_LOG_INFO("TLP probe sent: seq=" << probeSeq << " count=" << m_tlpProbeCount);
+    
+    // Trace point
+      m_tlpTxTrace(m_tlpProbeSeq, m_tlpProbeCount);
+  }
+}
+
+void
+TcpSocketBase::TlpTimeout()
+{
+  NS_LOG_FUNCTION(this);
+  
+  if (!m_tlpEnabled)
+  {
+    return;
+  }
+
+  NS_LOG_INFO("TLP timeout");
+  
+  if (m_tlpProbeOutstanding)
+  {
+    // TLP probe was lost, fall back to RTO
+    NS_LOG_INFO("TLP probe lost, will rely on RTO");
+    m_tlpProbeOutstanding = false;
+    // RTO will handle this case
+    return;
+  }
+
+  // Send TLP probe
+  SendTlpProbe();
+}
+
+void
+TcpSocketBase::CancelTlpTimer()
+{
+  NS_LOG_FUNCTION(this);
+  
+  if (m_tlpTimer.IsPending())
+  {
+    m_tlpTimer.Cancel();
+  }
+}
+
+void
+TcpSocketBase::UpdateTlpStateOnAck(const TcpHeader& tcpHeader)
+{
+  NS_LOG_FUNCTION(this << tcpHeader);
+  
+  if (!m_tlpEnabled)
+  {
+    return;
+  }
+
+  SequenceNumber32 ackNumber = tcpHeader.GetAckNumber();
+  
+  // Update last ACK time
+  m_tlpLastAckTime = Simulator::Now();
+
+  // Check if this ACK is for a TLP probe
+  if (m_tlpProbeOutstanding && ackNumber > m_tlpProbeSeq)
+  {
+    NS_LOG_INFO("TLP probe ACKed: probe_seq=" << m_tlpProbeSeq << " ack=" << ackNumber);
+    m_tlpProbeOutstanding = false;
+    
+    // Trace point
+      m_tlpAckTrace(m_tlpProbeSeq, ackNumber);
+
+    // TLP successful - we broke the ACK stall
+    // The ACK might have revealed more losses that will be handled by existing recovery
+    
+    // Reset TLP probe count for next potential episode
+    m_tlpProbeCount = 0;
+  }
+  else if (ackNumber > m_txBuffer->HeadSequence())
+  {
+    // Regular ACK that advances window - cancel any pending TLP
+    CancelTlpTimer();
+    m_tlpProbeCount = 0;
+    m_tlpProbeOutstanding = false;
+  }
+
+  // After processing ACK, consider scheduling new TLP probe if we still have outstanding data
+  if (m_txBuffer->BytesInFlight() > 0 && !m_tlpProbeOutstanding)
+  {
+    ScheduleTlpProbe();
+  }
+}
+
+
 
 /* Associate a node with this TCP socket */
 void
@@ -1176,6 +1387,9 @@ TcpSocketBase::CloseAndNotify()
     NS_LOG_DEBUG(TcpStateName[m_state] << " -> CLOSED");
     m_state = CLOSED;
     DeallocateEndPoint();
+
+    //cancel TLP Timer
+    CancelTlpTimer();
 }
 
 /* Tell if a sequence number range is out side the range that my rx buffer can
@@ -1856,6 +2070,9 @@ TcpSocketBase::ReceivedAck(Ptr<Packet> packet, const TcpHeader& tcpHeader)
 
     SequenceNumber32 ackNumber = tcpHeader.GetAckNumber();
     SequenceNumber32 oldHeadSequence = m_txBuffer->HeadSequence();
+
+    //update TLP state
+    UpdateTlpStateOnAck(tcpHeader);
 
     if (ackNumber < oldHeadSequence)
     {
@@ -2750,6 +2967,8 @@ TcpSocketBase::Destroy()
     NS_LOG_LOGIC(this << " Cancelled ReTxTimeout event which was set to expire at "
                       << (Simulator::Now() + Simulator::GetDelayLeft(m_retxEvent)).GetSeconds());
     CancelAllTimers();
+    //cancel TLP Timer
+    CancelTlpTimer();
 }
 
 /* Kill this socket. This is a callback function configured to m_endpoint in
@@ -3533,6 +3752,13 @@ TcpSocketBase::SendPendingData(bool withAck)
     {
         NS_LOG_DEBUG("SendPendingData no segments sent");
     }
+
+    //schedule TLP probe
+    if (m_txBuffer->BytesInFlight() > 0 && !m_tlpProbeOutstanding)
+    {
+        ScheduleTlpProbe();
+    }
+
     return nPacketsSent;
 }
 
@@ -4109,6 +4335,11 @@ TcpSocketBase::DoRetransmit()
     uint32_t sz = SendDataPacket(m_tcb->m_nextTxSequence, maxSizeToSend, true);
 
     NS_ASSERT(sz > 0);
+
+    //cancel TLP timer and reset state
+    CancelTlpTimer();
+    m_tlpProbeOutstanding = false;
+    m_tlpProbeCount = 0;
 }
 
 void

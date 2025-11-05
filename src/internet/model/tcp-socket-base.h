@@ -6,6 +6,9 @@
  *
  * Author: Adrian Sai-wah Tam <adrian.sw.tam@gmail.com>
  */
+
+
+// extra code at line:384, 702
 #ifndef TCP_SOCKET_BASE_H
 #define TCP_SOCKET_BASE_H
 
@@ -379,6 +382,11 @@ class TcpSocketBase : public TcpSocket
      */
     TracedCallback<Time, Time> m_lastRttTrace;
 
+    // TLP probe sent
+    TracedCallback<SequenceNumber32, uint32_t> m_tlpTxTrace;  
+    // TLP probe ACKed
+    TracedCallback<SequenceNumber32, SequenceNumber32> m_tlpAckTrace; 
+
     /**
      * @brief Callback function to hook to TcpSocketState pacing rate
      * @param oldValue old pacing rate value
@@ -691,6 +699,26 @@ class TcpSocketBase : public TcpSocket
     Time GetPersistTimeout() const override;
     bool SetAllowBroadcast(bool allowBroadcast) override;
     bool GetAllowBroadcast() const override;
+
+    // additional variables that are added
+
+    bool m_tlpEnabled;                          // Whether TLP is enabled
+    EventId m_tlpTimer;                         // TLP probe timer
+    uint32_t m_tlpProbeCount;                   // Number of TLP probes sent in current episode
+    bool m_tlpProbeOutstanding;                 // Is a TLP probe currently outstanding?
+    SequenceNumber32 m_tlpProbeSeq;             // Sequence number of the outstanding TLP probe
+    Time m_tlpLastAckTime;                      // Time when last ACK was received
+    uint32_t m_tlpMaxProbes;                    // Maximum TLP probes per recovery episode
+    Time m_tlpTimeoutMin;                       // Minimum TLP timeout
+    bool m_isTlpProbe;                          // Indicates if current transmission is a TLP probe
+
+    // additional TLP functions
+    void ScheduleTlpProbe();
+    void SendTlpProbe();
+    void TlpTimeout();
+    void CancelTlpTimer();
+    bool IsTlpAvailable() const;
+    void UpdateTlpStateOnAck(const TcpHeader& tcpHeader);
 
     // Helper functions: Connection set up
 

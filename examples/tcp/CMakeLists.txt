@@ -124,6 +124,15 @@ build_example(
 )
 
 build_example(
+  NAME tcp-tlp-demo-mid
+  SOURCE_FILES tcp-tlp-demo-mid.cc
+  LIBRARIES_TO_LINK
+    ${libpoint-to-point}
+    ${libapplications}
+    ${libinternet}
+)
+
+build_example(
   NAME tcp-tlp-comparison
   SOURCE_FILES tcp-tlp-comparison.cc
   LIBRARIES_TO_LINK

@@ -41,9 +41,9 @@ TailLossErrorModel::DoCorrupt(Ptr<Packet> p)
         std::cout << "DATA PACKET " << m_dataCount << " at " << Simulator::Now().GetSeconds() 
                   << "s, size: " << p->GetSize() << " bytes" << std::endl;
         
-        // Drop packet 7 to create tail loss5
-        if (m_dataCount == 7) {
-            std::cout << "*** DROPPING DATA PACKET 7 - CREATING TAIL LOSS ***" << std::endl;
+        // Drop packet to create tail loss (not the very last one)
+        if (m_dataCount >= 6 && m_dataCount <=7) {
+            std::cout << "*** DROPPING DATA PACKET "<<m_dataCount<<" - CREATING TAIL LOSS ***" << std::endl;
             return true;
         }
     }
@@ -63,7 +63,7 @@ int main(int argc, char *argv[])
     
     std::cout << "=== TCP TLP - REAL TAIL LOSS ===" << std::endl;
     std::cout << "TLP: " << (enableTlp ? "ENABLED" : "DISABLED") << std::endl;
-    std::cout << "Dropping DATA PACKET 7 (590-byte packet)" << std::endl;
+    std::cout << "Dropping DATA PACKET 4 (590-byte packet)" << std::endl;
     std::cout << "This should create tail loss that TLP can recover from" << std::endl;
     std::cout << std::endl;
     

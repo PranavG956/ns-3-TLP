@@ -561,7 +561,7 @@ TcpSocketBase::~TcpSocketBase()
 bool
 TcpSocketBase::IsTlpAvailable() const
 {
-  // TLP is available if enabled, not in recovery, and we have outstanding data
+  // TLP is available if enabled, not in recovery, and we have data not acknowledged
   return (m_tlpEnabled && 
           m_state != ESTABLISHED &&
           m_txBuffer->BytesInFlight() > 0 &&
@@ -573,14 +573,12 @@ void
 TcpSocketBase::ScheduleTlpProbe()
 {
   NS_LOG_FUNCTION(this);
-  
+  //TLP enabled, no probe outstanding, have enough data to send
   if (!IsTlpAvailable())
   {
     return;
   }
 
-  // Don't schedule if we're in CA_OPEN and have very little data in flight
-  // This prevents TLP from firing too aggressively
   if (m_state == ESTABLISHED  && m_txBuffer->BytesInFlight() <= m_tcb -> m_segmentSize)
   {
     return;
@@ -595,7 +593,7 @@ TcpSocketBase::ScheduleTlpProbe()
   }
   else
   {
-    // No RTT sample yet, use conservative timeout
+    //if no rtt yet
     tlpTimeout = MilliSeconds(100);
   }
 
@@ -615,14 +613,13 @@ TcpSocketBase::SendTlpProbe()
     return;
   }
 
-  // Determine what to send as probe
   SequenceNumber32 probeSeq;
   bool isRetransmission = false;
 
-  // Strategy: Send new data if available, otherwise retransmit oldest unacked
+  // Check if new data is available to send
   if (m_txBuffer->SizeFromSequence(m_tcb->m_nextTxSequence) > 0)
   {
-    // New data available
+    // New data is available
     probeSeq = m_tcb->m_nextTxSequence;
     NS_LOG_INFO("TLP sending new data as probe: seq=" << probeSeq);
   }
@@ -698,33 +695,27 @@ TcpSocketBase::UpdateTlpStateOnAck(const TcpHeader& tcpHeader)
 
   SequenceNumber32 ackNumber = tcpHeader.GetAckNumber();
   
-  // Update last ACK time
   m_tlpLastAckTime = Simulator::Now();
 
-  // Check if this ACK is for a TLP probe
+  // Check if this ACK is for a TLP probe or an acknowledgement
   if (m_tlpProbeOutstanding && ackNumber > m_tlpProbeSeq)
   {
     NS_LOG_INFO("TLP probe ACKed: probe_seq=" << m_tlpProbeSeq << " ack=" << ackNumber);
     m_tlpProbeOutstanding = false;
     
-    // Trace point
       m_tlpAckTrace(m_tlpProbeSeq, ackNumber);
 
-    // TLP successful - we broke the ACK stall
-    // The ACK might have revealed more losses that will be handled by existing recovery
-    
-    // Reset TLP probe count for next potential episode
     m_tlpProbeCount = 0;
   }
   else if (ackNumber > m_txBuffer->HeadSequence())
   {
-    // Regular ACK that advances window - cancel any pending TLP
+    // Regular ACK
     CancelTlpTimer();
     m_tlpProbeCount = 0;
     m_tlpProbeOutstanding = false;
   }
 
-  // After processing ACK, consider scheduling new TLP probe if we still have outstanding data
+  // After processing ACK check for any outstanding data and schedule a new probe
   if (m_txBuffer->BytesInFlight() > 0 && !m_tlpProbeOutstanding)
   {
     ScheduleTlpProbe();
